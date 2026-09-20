@@ -111,10 +111,14 @@ class ConnectionManager extends Service {
       StreamController<Map<String, PresenceState>>.broadcast();
   // Plan 17 — rooms tracking. Keys are STANDARD base64 epks (matches
   // presence map). Each value is the canonical room list for that peer.
-  // Plan-17 follow-up — `_roomsByPeer` is the CANONICAL set (cached +
-  // currently announced). `_liveRoomIds` tracks which roomIds are
-  // alive RIGHT NOW (in the relay snapshot). Rooms in `_roomsByPeer`
-  // but not in `_liveRoomIds` are "offline" (last-seen state).
+  // Plan 63 — `_roomsByPeer` holds only rooms the relay currently
+  // confirms live, plus restored last-known rooms that have not been
+  // contradicted yet by an authoritative snapshot. `RoomEnded` and
+  // `RoomsSnapshot` both PRUNE ended rooms (memory + disk) instead of
+  // keeping grey historical tiles. `_liveRoomIds` tracks which roomIds
+  // are alive RIGHT NOW (in the relay snapshot). Cached rooms not in
+  // the live set are shown offline (restored / locally degraded) until
+  // a snapshot either re-confirms or prunes them.
   final Map<String, List<RoomInfo>> _roomsByPeer = <String, List<RoomInfo>>{};
   final Map<String, Set<String>> _liveRoomIds = <String, Set<String>>{};
   final _roomsController =
@@ -899,6 +903,9 @@ class ConnectionManager extends Service {
   /// Plan-17 follow-up — hydrate `_roomsByPeer` from disk on boot so
   /// Home tiles persist across cold starts even before the relay
   /// pushes a fresh snapshot. Idempotent.
+  ///
+  /// Plan 63 — restored rooms are last-known, not authoritative: the
+  /// first `RoomsSnapshot` after connect prunes any that have ended.
   Future<void> _restoreCachedRooms() async {
     if (_roomsRestored) return;
     _roomsRestored = true;
@@ -919,7 +926,8 @@ class ConnectionManager extends Service {
           )
           .toList();
       // Note: nothing in _liveRoomIds yet — those rooms are "offline"
-      // until the relay announces them again.
+      // until the relay announces them again (or the first snapshot
+      // prunes them if they ended — plan 63).
     }
     if (!_roomsController.isClosed) {
       _roomsController.add(_roomsSnapshot());
