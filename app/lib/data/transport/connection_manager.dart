@@ -718,31 +718,31 @@ class ConnectionManager extends Service {
         _persistRoomsForPeer(key);
       case RoomsSnapshot(:final peer, :final rooms):
         final key = toStandardB64(peer);
-        // Merge snapshot into cache: add unknown rooms, refresh
-        // metadata (preserving local rename + previous model when
-        // the snapshot omits it), update live set.
+        // Plan 63 — the snapshot is AUTHORITATIVE: the peer's cached
+        // list becomes exactly the rooms the relay reports live. Cached
+        // rooms absent from the snapshot ended while we were away and
+        // are dropped (memory + disk) instead of lingering as grey
+        // tiles. localName / model / thinking are still preserved for
+        // rooms present in both.
         final existing = _roomsByPeer[key] ?? <RoomInfo>[];
         final byId = {for (final r in existing) r.roomId: r};
-        for (final r in rooms) {
-          final preservedName = byId[r.roomId]?.name ?? r.name;
-          final preservedModel = r.model ?? byId[r.roomId]?.model;
-          // Plan/28 Wave D — same convention as model: keep the
-          // previously-known thinking when the snapshot omits it.
-          final preservedThinking = r.thinking ?? byId[r.roomId]?.thinking;
-          byId[r.roomId] = RoomInfo(
-            roomId: r.roomId,
-            name: preservedName,
-            cwd: r.cwd,
-            startedAt: r.startedAt,
-            model: preservedModel,
-            thinking: preservedThinking,
-            // Plan/32 — the snapshot is authoritative for live state:
-            // `rooms_of` reads the current registry meta, so its
-            // `working` reflects the latest turn_start/turn_end.
-            working: r.working,
-          );
-        }
-        final newList = byId.values.toList();
+        final newList = <RoomInfo>[
+          for (final r in rooms)
+            RoomInfo(
+              roomId: r.roomId,
+              name: byId[r.roomId]?.name ?? r.name,
+              cwd: r.cwd,
+              startedAt: r.startedAt,
+              model: r.model ?? byId[r.roomId]?.model,
+              // Plan/28 Wave D — same convention as model: keep the
+              // previously-known thinking when the snapshot omits it.
+              thinking: r.thinking ?? byId[r.roomId]?.thinking,
+              // Plan/32 — the snapshot is authoritative for live state:
+              // `rooms_of` reads the current registry meta, so its
+              // `working` reflects the latest turn_start/turn_end.
+              working: r.working,
+            ),
+        ];
         final newLive = rooms.map((r) => r.roomId).toSet();
         final liveChanged = !_setEquals(
           newLive,
@@ -754,7 +754,11 @@ class ConnectionManager extends Service {
           // have. Skip — no listeners need to know.
           break;
         }
-        _roomsByPeer[key] = newList;
+        if (newList.isEmpty) {
+          _roomsByPeer.remove(key);
+        } else {
+          _roomsByPeer[key] = newList;
+        }
         _liveRoomIds[key] = newLive;
         roomsDirty = true;
         // ignore: unawaited_futures
