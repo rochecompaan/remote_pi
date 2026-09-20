@@ -1152,10 +1152,10 @@ void _registerRoomsTests() {
           sinceTs: 2000,
         ));
         await Future<void>.delayed(const Duration(milliseconds: 5));
-        // Plan-17 follow-up: RoomEnded keeps the room CACHED so the
-        // tile stays in Home (marked offline) — only the live set
-        // shrinks. isRoomLive now distinguishes the two.
-        expect(cm.roomsFor('epkA'), hasLength(1));
+        // Plan 63: RoomEnded REMOVES the room from the cache — ended
+        // sessions disappear immediately instead of lingering as grey
+        // historical tiles.
+        expect(cm.roomsFor('epkA'), isEmpty);
         expect(cm.isRoomLive('epkA', 'r1'), isFalse);
 
         ch.pushControl(const RoomsSnapshot(peer: 'epkA', rooms: [
@@ -1163,15 +1163,105 @@ void _registerRoomsTests() {
           RoomInfo(roomId: 'rB', startedAt: 4000, cwd: '/b'),
         ]));
         await Future<void>.delayed(const Duration(milliseconds: 5));
-        // Plan-17 follow-up: snapshots MERGE with cached rooms (so a
-        // room going offline keeps its tile). r1 is still in cache
-        // (offline), rA and rB are now live → total 3.
-        expect(cm.roomsFor('epkA'), hasLength(3));
+        // Plan 63: the snapshot is authoritative — exactly the live
+        // rooms; the ended r1 does NOT come back.
+        expect(cm.roomsFor('epkA'), hasLength(2));
         expect(cm.isRoomLive('epkA', 'r1'), isFalse);
         expect(cm.isRoomLive('epkA', 'rA'), isTrue);
         expect(cm.isRoomLive('epkA', 'rB'), isTrue);
 
         await sub.cancel();
+        cm.dispose();
+      },
+    );
+
+    test(
+      'RoomEnded removes the room from the cache and persists the '
+      'pruned list (plan 63)',
+      () async {
+        final storage = _FakeStorage([_fakePeer()]);
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: storage,
+          emitDebounce: Duration.zero,
+        );
+        await cm.connectTo(_fakePeer());
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        ch.pushControl(const RoomAnnounced(
+            peer: 'epk_test', roomId: 'r1', startedAt: 1));
+        ch.pushControl(const RoomAnnounced(
+            peer: 'epk_test', roomId: 'r2', startedAt: 2));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(cm.roomsFor('epk_test'), hasLength(2));
+        expect(
+          (await storage.loadRooms('epk_test')).map((r) => r.roomId),
+          containsAll(['r1', 'r2']),
+        );
+
+        ch.pushControl(
+            const RoomEnded(peer: 'epk_test', roomId: 'r1', sinceTs: 3));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        expect(cm.roomsFor('epk_test').single.roomId, 'r2');
+        final persisted = await storage.loadRooms('epk_test');
+        expect(persisted.single.roomId, 'r2',
+            reason: 'ended room must be pruned from disk too');
+
+        cm.dispose();
+      },
+    );
+
+    test(
+      'RoomEnded for an unknown room is a no-op (plan 63)',
+      () async {
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: _FakeStorage([]),
+          emitDebounce: Duration.zero,
+        );
+        await cm.connectTo(_fakePeer());
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        ch.pushControl(
+            const RoomEnded(peer: 'epk_ghost', roomId: 'rX', sinceTs: 1));
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+
+        expect(cm.roomsFor('epk_ghost'), isEmpty);
+
+        cm.dispose();
+      },
+    );
+
+    test(
+      'room re-announced after RoomEnded reappears as live (plan 63)',
+      () async {
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: _FakeStorage([]),
+          emitDebounce: Duration.zero,
+        );
+        await cm.connectTo(_fakePeer());
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        ch.pushControl(const RoomAnnounced(
+            peer: 'epkA', roomId: 'r1', startedAt: 1));
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        ch.pushControl(
+            const RoomEnded(peer: 'epkA', roomId: 'r1', sinceTs: 2));
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        expect(cm.roomsFor('epkA'), isEmpty);
+
+        ch.pushControl(const RoomAnnounced(
+            peer: 'epkA', roomId: 'r1', startedAt: 3));
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+
+        expect(cm.roomsFor('epkA').single.roomId, 'r1');
+        expect(cm.isRoomLive('epkA', 'r1'), isTrue);
+
         cm.dispose();
       },
     );

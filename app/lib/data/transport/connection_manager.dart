@@ -655,14 +655,26 @@ class ConnectionManager extends Service {
         _maybeAdoptLegacyRoom(key, roomId);
       case RoomEnded(:final peer, :final roomId):
         final key = toStandardB64(peer);
-        // Mark the room offline but KEEP it in the cached set so the
-        // tile stays in Home (now grey). Removing from _liveRoomIds
-        // is enough.
-        final removed = _liveRoomIds[key]?.remove(roomId) ?? false;
+        // Plan 63 — ended sessions disappear immediately: drop the room
+        // from the cache and from disk instead of keeping a grey
+        // historical tile. The live set shrinks too.
+        final removedLive = _liveRoomIds[key]?.remove(roomId) ?? false;
         if (_liveRoomIds[key]?.isEmpty ?? false) {
           _liveRoomIds.remove(key);
         }
-        if (removed) roomsDirty = true;
+        final list = _roomsByPeer[key];
+        var removedCached = false;
+        if (list != null) {
+          final before = list.length;
+          list.removeWhere((r) => r.roomId == roomId);
+          removedCached = list.length != before;
+          if (list.isEmpty) _roomsByPeer.remove(key);
+        }
+        if (removedLive || removedCached) roomsDirty = true;
+        if (removedCached) {
+          // ignore: unawaited_futures
+          _persistRoomsForPeer(key);
+        }
       case RoomMetaUpdated(
         :final peer,
         :final roomId,
