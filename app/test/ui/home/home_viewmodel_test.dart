@@ -335,6 +335,12 @@ void main() {
         'without reloading', () async {
       final ch = _ControllableChannel();
       final storage = _FakeStorage([_peerA]);
+      // Plan 63: the offline slice is a room restored from disk that
+      // the relay has not confirmed yet (ended rooms are pruned, not
+      // greyed).
+      await storage.saveRooms('epk_A', const [
+        PersistedRoom(roomId: 'r2', startedAt: 2, name: 'restored'),
+      ]);
       final conn = ConnectionManager(
         factory: (_, _) async => ch,
         storage: storage,
@@ -342,21 +348,16 @@ void main() {
       );
       final prefs = Preferences(_FakeSecureStorage());
       final vm = HomeViewModel(storage, prefs, conn);
-      await conn.connectTo(_peerA);
+      await conn.boot();
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      // r1 stays live; r2 is announced then ended → cached but offline
-      // (grey tile — still in _roomsByPeer, dropped from _liveRoomIds).
+      // r1 is announced live; r2 stays restored-but-unconfirmed (offline).
       ch.pushControl(
         const RoomAnnounced(peer: 'epk_A', roomId: 'r1', startedAt: 1),
       );
-      ch.pushControl(
-        const RoomAnnounced(peer: 'epk_A', roomId: 'r2', startedAt: 2),
-      );
-      ch.pushControl(const RoomEnded(peer: 'epk_A', roomId: 'r2', sinceTs: 3));
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      // Sanity — one live, one cached/offline.
+      // Sanity — one live, one restored/offline.
       expect(vm.isRoomLive('epk_A', 'r1'), isTrue);
       expect(vm.isRoomLive('epk_A', 'r2'), isFalse);
 
@@ -367,7 +368,7 @@ void main() {
       expect((vm.state as HomeList).filter, HomeFilter.online);
       expect(vm.visibleItems.map((i) => i.room.roomId).toList(), ['r1']);
 
-      // Offline → only the cached room.
+      // Offline → only the restored room.
       vm.setFilter(HomeFilter.offline);
       expect((vm.state as HomeList).filter, HomeFilter.offline);
       expect(vm.visibleItems.map((i) => i.room.roomId).toList(), ['r2']);
@@ -376,6 +377,41 @@ void main() {
       vm.setFilter(HomeFilter.all);
       expect(vm.visibleItems.map((i) => i.room.roomId).toList(), ['r1', 'r2']);
       expect(vm.counts, (all: 2, online: 1, offline: 1));
+
+      vm.dispose();
+      await conn.disconnect();
+      conn.dispose();
+    });
+
+    test('an ended room disappears from counts and items immediately '
+        '(plan 63)', () async {
+      final ch = _ControllableChannel();
+      final storage = _FakeStorage([_peerA]);
+      final conn = ConnectionManager(
+        factory: (_, _) async => ch,
+        storage: storage,
+        emitDebounce: Duration.zero,
+      );
+      final prefs = Preferences(_FakeSecureStorage());
+      final vm = HomeViewModel(storage, prefs, conn);
+      await conn.connectTo(_peerA);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      ch.pushControl(
+        const RoomAnnounced(peer: 'epk_A', roomId: 'r1', startedAt: 1),
+      );
+      ch.pushControl(
+        const RoomAnnounced(peer: 'epk_A', roomId: 'r2', startedAt: 2),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.counts, (all: 2, online: 2, offline: 0));
+
+      ch.pushControl(const RoomEnded(peer: 'epk_A', roomId: 'r2', sinceTs: 3));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(vm.counts, (all: 1, online: 1, offline: 0));
+      vm.setFilter(HomeFilter.all);
+      expect(vm.visibleItems.map((i) => i.room.roomId).toList(), ['r1']);
 
       vm.dispose();
       await conn.disconnect();
